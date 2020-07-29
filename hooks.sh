@@ -8,6 +8,7 @@
 IS_ADOM=0
 LOGGED=0
 URL_VDOM=''
+AUTH=$(printf $USERNAME':'$PASSWORD | base64)
 
 function send_curl() 
 {
@@ -17,7 +18,7 @@ function send_curl()
     
     local AUTH=$(printf $USERNAME':'$PASSWORD | base64)
     
-    test "$__adom" && AUTH=$(printf $USERNAME':'$PASSWORD':'$__adom | base64)
+    # test "$__adom" && AUTH=$(printf $USERNAME':'$PASSWORD':'$__adom | base64)
     
     local CURL="/usr/bin/curl -s -f -m 5 -H 'Accept: application/json' -H 'Authorization: $AUTH'"
     CMD="$CURL -k -X $__method https://$FORTIWEB:90/api/v1.0/$__url"
@@ -96,9 +97,6 @@ function get_certificate_list() {
     return 0
 }
 
-
-
-
 function search_global_dns_server_zone() {
     echo '   + retrieving zone record for domain : '$DOMAIN
     
@@ -174,6 +172,116 @@ function add_certificate() {
     echo '     + something wrong append'
 }
 
+function send_form_curl() {
+    local url="$1"
+    local content="$2"
+    shift; shift
+    local form=("$@")
+
+    local AUTH=$(printf $USERNAME':'$PASSWORD | base64)
+
+    local CURL="/usr/bin/curl -H 'Content-Type: $content' -H 'Authorization: $AUTH'"
+
+    for i in "${form[@]}"; do
+        CURL+=" -F ${i}"
+    done
+
+    CMD="$CURL -k -X POST https://$FORTIWEB:90/api/v1.0/$url"
+}
+
+function check_sni_members() {
+    local id=0
+
+    for row in $(echo "$MEMBERS" | jq -r '.[] | @base64'); do
+        _jq() {
+            echo ${row} | base64 --decode | jq -r ${1}
+        }
+        local SNI_DOMAIN=$(echo $(_jq '.domain'))
+        if [ $DOMAIN == $SNI_DOMAIN ]; then
+            id=$(echo $(_jq '.id'))
+            # echo "$id"
+        fi
+    done
+
+    return $id
+}
+
+function find_sni() {
+
+    echo '   + Check existant SNI certificate for '$DOMAIN
+
+    local CURL="curl -s -X GET -k -H 'Authorization:$AUTH' 'https://$FORTIWEB:90/api/v1.0/System/Certificates/SNI'"
+    local CMD=$CURL' || echo -1'
+    local SNIS=$(eval $CMD)
+    local id
+
+    if [ -1 == "$SNIS" ]; then 
+        echo '     + connection error !'
+        return -1
+    fi
+
+    # encode in base64 because of space in name
+    for row in $(echo "$SNIS" | jq -r '.[] | @base64'); do
+        _jq() {
+            echo ${row} | base64 --decode | jq -r ${1} | sed "s/\s/%20/g"
+        }
+        SNI_NAME=$(echo $(_jq '._id'))
+
+        local CURL="curl -s -k -H 'Authorization:$AUTH' 'https://$FORTIWEB:90/api/v1.0/System/Certificates/SNI/$SNI_NAME/SniServerNameIndicationMember'"
+        local CMD=$CURL' || echo -1'
+        local MEMBERS=$(eval $CMD)
+        if [ -1 == "$MEMBERS" ]; then 
+            echo '     + fail to get SNI members !'
+            return -1
+        fi
+        check_sni_members $MEMBERS
+        id=$(echo $?)
+        if [[ 0 != $id ]]; then
+            break
+        fi
+    done
+
+    # SNI_NAMES=$(echo $EVAL | jq -r ".[]._id")
+    # echo $SNI_NAMES
+    return $id
+}
+
+function delete_certificate() {
+    echo '   + Deleting certificate for '$DOMAIN
+
+    send_curl "DELETE" "/System/Certificates/Local/$DOMAIN"
+}
+
+function import_certificate() {
+
+    echo '   + Transforming certificate for '$DOMAIN' into crt and key file'
+
+    NEW_CERTFILE=$(echo $CERTFILE | sed "s/cert\.pem/$DOMAIN.crt/g")
+    NEW_KEYFILE=$(echo $KEYFILE | sed "s/privkey\.pem/$DOMAIN.key/g")
+
+    openssl x509 -outform der -in $CERTFILE -out $NEW_CERTFILE
+    openssl rsa -outform der -in $KEYFILE -out $NEW_KEYFILE
+
+    echo '   + importing certificate for '$DOMAIN
+
+    form=("type=certificate" "certificateFile=@$NEW_CERTFILE" "keyFile=@$NEW_KEYFILE")
+
+    send_form_curl "System/Certificates/Local" "multipart/form-data" "${form[@]}"
+    local CMD=$CMD' || echo -1'
+    local EVAL=$(eval $CMD)
+
+    if [ -1 == "$EVAL" ]; then 
+        echo '     + connection error !'
+        return -1
+    fi
+
+    # curl -k -X POST -H "Content-Type: multipart/form-data" -H "Authorization:bG91aXMuYmFyYmFnbGlhOjNRRj9NST9pNlBtUkw2eQ==" \
+    #                 -F "type=certificate" \
+    #                 -F "certificateFile=@$NEW_CERTFILE" \
+    #                 -F "keyFile=@$NEW_KEYFILE" \
+    #                 "https://$FORTIWEB:90/api/v1.0/System/Certificates/Local"
+}
+
 
 
 function deploy_challenge() {
@@ -241,9 +349,30 @@ function deploy_cert() {
     
     login
     test $LOGGED == 0 && return # Stop if not logged
-    get_certificate_list
+    # echo $KEYFILE $CERTFILE $FULLCHAINFILE $CHAINFILE
+    find_sni
+    echo $?
+    echo $SNI_NAME
+    # import_certificate
+    # get_certificate_list
     
-    
+    # if [[ SNI exist ]]
+    # then
+    #     delete SNI
+    #     delete certificate local
+    # fi
+    # import local
+    # create SNI
+
+    # if SNI exist
+    #     delete SNI
+    #     delete certificate local
+    #     import local
+    #     create SNI
+    # then
+    #     import local
+    #     create SNI
+    # fi
 }
 
 function unchanged_cert() {
