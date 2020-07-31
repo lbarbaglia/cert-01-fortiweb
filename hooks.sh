@@ -14,15 +14,41 @@ function send_curl()
 {
     local  __method=$1
     local  __url=$2
-    local  __adom=$3
-    
+
     local AUTH=$(printf $USERNAME':'$PASSWORD | base64)
-    
-    # test "$__adom" && AUTH=$(printf $USERNAME':'$PASSWORD':'$__adom | base64)
-    
-    local CURL="/usr/bin/curl -s -f -m 5 -H 'Accept: application/json' -H 'Authorization: $AUTH'"
+
+    local CURL="/usr/bin/curl -s -f -H 'Authorization: $AUTH'"
     CMD="$CURL -k -X $__method https://$FORTIWEB:90/api/v1.0/$__url"
 }
+
+function send_form_curl() {
+    local url="$1"
+    local content="$2"
+    shift; shift
+    local form=("$@")
+
+    local AUTH=$(printf $USERNAME':'$PASSWORD | base64)
+
+    local CURL="/usr/bin/curl -s -f -H 'Content-Type: $content' -H 'Authorization: $AUTH'"
+
+    for i in "${form[@]}"; do
+        CURL+=" -F ${i}"
+    done
+
+    CMD="$CURL -k -X POST https://$FORTIWEB:90/api/v1.0/$url"
+}
+
+function send_post_curl() {
+    local url="$1"
+    local data="$2"
+
+    local AUTH=$(printf $USERNAME':'$PASSWORD | base64)
+
+    local CURL="/usr/bin/curl -s -f -H 'Authorization: $AUTH'"
+
+    CMD="$CURL -k -X POST https://$FORTIWEB:90/api/v1.0/$url -d '$data'"
+}
+
 
 function login() {
     echo '   + login'
@@ -34,54 +60,16 @@ function login() {
         echo '     + connection error !'
         return -1
     fi
-    
+
     LOGGED=1
-    
-    if [ $(echo $EVAL | jq -r '.administrativeDomain') == "Enabled" ]; then 
-        echo '     + ADOM detected !'
-        IS_ADOM=1
-        #get_adom_list
-        return 0
-    fi
-    
+
     return 0
 }
-
-
-function get_adom_list() {
-    echo '  + get ADOM list'
-    local CMD=$CURL_GET'/System/Status/Status || echo -1'
-    local EVAL=$(eval $CMD)
-    
-    if [ -1 == "$EVAL" ]; then 
-        echo '     + connection error !'
-        return
-    fi
-    
-    VDOMS=$(echo $EVAL | jq -r '.payload[] | { mkey: .mkey | select(. != null) } | @base64')
-    
-    if [ -z "$VDOMS" ]; then 
-        echo '   + no vdom detected !'
-        IS_VDOM=0
-        return
-    fi
-    
-    echo '   + vdom detected !'
-    IS_VDOM=1
-}
-
-
-function global_dns_server_zone() {
-    echo '     + extract zone records'
-    local CMD=$CURL_GET'/global_dns_server_zone?'$URL_VDOM
-    ZONES=$(eval $CMD | jq -r '.payload[] | { mkey: .mkey, domain_name: .domain_name | select(. != null) } | @base64')
-}
-
 
 function get_certificate_list() {
     echo '     + extract certificate list'
     
-    send_curl 'GET' 'System/Certificates/Local' 'root'
+    send_curl 'GET' 'System/Certificates/Local'
     local CMD=$CMD' || echo -1'
     local EVAL=$(eval $CMD)
     
@@ -92,105 +80,10 @@ function get_certificate_list() {
     
     echo $EVAL | jq
     
-    #ZONES=$(eval $CMD | jq -r '.payload[] | { mkey: .mkey, domain_name: .domain_name | select(. != null) } | @base64')
-    
     return 0
 }
 
-function search_global_dns_server_zone() {
-    echo '   + retrieving zone record for domain : '$DOMAIN
-    
-    global_dns_server_zone
-    
-    test -z "${ZONES}" && echo '     + no zones found' && return 1
-
-    local SEARCH=$DOMAIN'.'
-    
-    for row in $ZONES; do
-        DOMAIN_NAME=$(echo ${row} | base64 --decode | jq -r '.domain_name')
-        if [[ $SEARCH == *"$DOMAIN_NAME"* ]] ; then
-            MKEY=$(echo ${row} | base64 --decode | jq -r '.mkey')
-            
-            CLEAN_DOMAIN='_acme-challenge'
-            test $(expr ${#SEARCH} - ${#DOMAIN_NAME} - 1) -ge 0 && CLEAN_DOMAIN=$CLEAN_DOMAIN'.'$(echo ${SEARCH:0:$(expr ${#SEARCH} - ${#DOMAIN_NAME} - 1)})
-            
-            echo '     + zone is '$MKEY
-            echo '     + txt record is '$CLEAN_DOMAIN
-            return
-        fi
-    done
-    echo '     + no zone found '
-}
-
-function get_global_dns_server_zone_child_txt_record() {
-    echo '     + retrieving TXT records for zone '$MKEY
-    local CMD=$CURL_GET'/global_dns_server_zone_child_txt_record?'$URL_VDOM'pkey='$MKEY' || echo -1'
-    TXT_RECORDS=$($CMD | jq -r '.payload[] | @base64')
-}
-
-function get_global_dns_server_zone_child_txt_record_idx() {
-    echo '   + retrieving ID TXT record for '$CLEAN_DOMAIN
-    
-    get_global_dns_server_zone_child_txt_record
-    
-    test -z "${TXT_RECORDS}" && echo '     + no record found' && return 1
-    
-    for row in $TXT_RECORDS; do
-        local NAME=$(echo ${row} | base64 --decode | jq -r '.name')
-        if [[ $CLEAN_DOMAIN == $NAME ]] ; then
-            IDX=$(echo ${row} | base64 --decode | jq -r '.mkey')
-                
-            echo '     + index record is '$IDX
-            return
-        fi
-    done
-}
-
-function add_certificate() {
-    
-    get_global_dns_server_zone_child_txt_record_idx $MKEY $CLEAN_DOMAIN
-    test -n "${IDX}" && echo '     + txt entrie already exist : pass !' && return 1
-
-    echo '   + add TXT record for '$DOMAIN
-    
-    IDX=$(date +%s)
-    
-    local DATA='{"mkey":"'$IDX'","name":"'$CLEAN_DOMAIN'","text":"'$TOKEN_VALUE'","ttl":"3600"}'
-    local CMD=$CURL_POST'/global_dns_server_zone_child_txt_record?'$URL_VDOM'pkey='$MKEY' -d '$DATA' || echo -1'
-    local EVAL=$($CMD)
-    
-    if [ -1 == $EVAL ]; then 
-        echo '     + connection error !'
-        return
-    fi
-    
-    if [[ $(echo $EVAL | jq -r '.payload') == 0 ]] ; then
-        echo '     + success !'
-        return
-    fi
-    
-    echo '     + something wrong append'
-}
-
-function send_form_curl() {
-    local url="$1"
-    local content="$2"
-    shift; shift
-    local form=("$@")
-
-    local AUTH=$(printf $USERNAME':'$PASSWORD | base64)
-
-    local CURL="/usr/bin/curl -H 'Content-Type: $content' -H 'Authorization: $AUTH'"
-
-    for i in "${form[@]}"; do
-        CURL+=" -F ${i}"
-    done
-
-    CMD="$CURL -k -X POST https://$FORTIWEB:90/api/v1.0/$url"
-}
-
 function check_sni_members() {
-    local id=0
 
     for row in $(echo "$MEMBERS" | jq -r '.[] | @base64'); do
         _jq() {
@@ -198,22 +91,22 @@ function check_sni_members() {
         }
         local SNI_DOMAIN=$(echo $(_jq '.domain'))
         if [ $DOMAIN == $SNI_DOMAIN ]; then
-            id=$(echo $(_jq '.id'))
-            # echo "$id"
+            SNI_ID=$(echo $(_jq '.id'))
+            break
         fi
     done
 
-    return $id
+    return 0
 }
 
-function find_sni() {
+function check_sni() {
 
     echo '   + Check existant SNI certificate for '$DOMAIN
 
     local CURL="curl -s -X GET -k -H 'Authorization:$AUTH' 'https://$FORTIWEB:90/api/v1.0/System/Certificates/SNI'"
     local CMD=$CURL' || echo -1'
     local SNIS=$(eval $CMD)
-    local id
+    SNI_ID=''
 
     if [ -1 == "$SNIS" ]; then 
         echo '     + connection error !'
@@ -235,21 +128,106 @@ function find_sni() {
             return -1
         fi
         check_sni_members $MEMBERS
-        id=$(echo $?)
-        if [[ 0 != $id ]]; then
+        if [[ ! -z $SNI_ID ]]; then
             break
         fi
     done
 
-    # SNI_NAMES=$(echo $EVAL | jq -r ".[]._id")
-    # echo $SNI_NAMES
-    return $id
+    return 0
+}
+
+function delete_sni() {
+    echo '   + Deleting SNI certificate member for '$DOMAIN
+
+    send_curl "DELETE" "System/Certificates/SNI/$SNI_NAME/SniServerNameIndicationMember/$SNI_ID"
+    local CMD=$CMD' || echo -1'
+    local EVAL=$(eval $CMD)
+
+    if [ -1 == "$EVAL" ]; then
+        echo '     + connection error !'
+        return -1
+    fi
+
+    echo '   + SNI certificate member deleted for '$DOMAIN
+}
+
+function update_sni() {
+
+    echo '   + update SNI certificate member for '$DOMAIN
+
+    local DATA="{\"domainType\":0, \"localCertificate\": \"$DOMAIN\", \"intermediateCAGroup\": \"Lets Encrypt CA Group\", \"certificateVerify\":\"\", \"domain\":\"$DOMAIN\"}"
+
+    send_post_curl "System/Certificates/SNI/$SNI_NAME/SniServerNameIndicationMember" "$DATA"
+    local CMD=$CMD' || echo -1'
+    local EVAL=$(eval $CMD)
+
+    if [ -1 == "$EVAL" ]; then 
+        echo '     + connection error !'
+        return -1
+    fi
+
+    echo '   + SNI certificate member updated for '$DOMAIN
+
+}
+
+function create_sni() {
+    echo '   + creating new SNI for '$DOMAIN
+
+    local DATA="{\"name\":\"$DOMAIN\"}"
+
+    send_post_curl "System/Certificates/SNI" "$DATA"
+    local CMD=$CMD' || echo -1'
+    local EVAL=$(eval $CMD)
+
+    if [ -1 == "$EVAL" ]; then 
+        echo '     + connection error !'
+        return -1
+    fi
+
+    echo '   + SNI created for '$DOMAIN
+
+}
+
+function check_certificates() {
+    echo '   + Check existant certificate for '$DOMAIN
+
+    send_curl "GET" "System/Certificates/Local"
+    local CMD=$CMD' || echo -1'
+    local CERTS_DOMAINS=$(eval $CMD)
+    CERT_NAME=''
+
+    if [ -1 == "$CERTS" ]; then
+        echo '     + connection error !'
+        return -1
+    fi
+
+    for row in $(echo "$CERTS_DOMAINS" | jq -r '.[] | @base64'); do
+        _jq() {
+            echo ${row} | base64 --decode | jq -r ${1}
+        }
+        CERT_DOMAIN=$(echo $(_jq '.subject') | awk -F 'CN = ' '{print $2}' | awk '{print $1}' | sed 's/\,//g')
+        # echo $(_jq '.name')
+        if [ "$DOMAIN" == "$CERT_DOMAIN" ]; then
+            CERT_NAME=$(echo $(_jq '.name'))
+            break
+        fi
+    done
+
+    return
 }
 
 function delete_certificate() {
     echo '   + Deleting certificate for '$DOMAIN
 
-    send_curl "DELETE" "/System/Certificates/Local/$DOMAIN"
+    send_curl "DELETE" "System/Certificates/Local/$DOMAIN"
+    local CMD=$CMD' || echo -1'
+    local EVAL=$(eval $CMD)
+    
+    if [ -1 == "$EVAL" ]; then 
+        echo '     + connection error !'
+        return -1
+    fi
+    echo '   + Certificate deleted for '$DOMAIN
 }
 
 function import_certificate() {
@@ -275,11 +253,7 @@ function import_certificate() {
         return -1
     fi
 
-    # curl -k -X POST -H "Content-Type: multipart/form-data" -H "Authorization:bG91aXMuYmFyYmFnbGlhOjNRRj9NST9pNlBtUkw2eQ==" \
-    #                 -F "type=certificate" \
-    #                 -F "certificateFile=@$NEW_CERTFILE" \
-    #                 -F "keyFile=@$NEW_KEYFILE" \
-    #                 "https://$FORTIWEB:90/api/v1.0/System/Certificates/Local"
+    echo '   + import finished for '$DOMAIN
 }
 
 
@@ -349,30 +323,29 @@ function deploy_cert() {
     
     login
     test $LOGGED == 0 && return # Stop if not logged
-    # echo $KEYFILE $CERTFILE $FULLCHAINFILE $CHAINFILE
-    find_sni
-    echo $?
-    echo $SNI_NAME
-    # import_certificate
-    # get_certificate_list
-    
-    # if [[ SNI exist ]]
-    # then
-    #     delete SNI
-    #     delete certificate local
-    # fi
-    # import local
-    # create SNI
 
-    # if SNI exist
-    #     delete SNI
-    #     delete certificate local
-    #     import local
-    #     create SNI
-    # then
-    #     import local
-    #     create SNI
-    # fi
+    check_sni
+
+    if [ ! -z "$SNI_ID" ]; then
+        echo ' + SNI exist'
+        delete_sni
+    else
+        echo ' + no SNI found'
+        SNI_NAME=$DOMAIN
+        create_sni
+    fi
+
+    check_certificates
+
+    if [ ! -z "$CERT_NAME" ]; then
+        echo ' + Certificate found'
+        delete_certificate
+    else
+        echo ' + No certificate found'
+    fi
+
+    import_certificate
+    update_sni
 }
 
 function unchanged_cert() {
